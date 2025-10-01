@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node dist/main.js",
     "dev": "nest start --watch",
-    "build": "nest build",
+    "build": "tsc -p tsconfig.json",
     "lint": "eslint --ext .ts src",
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",
@@ -13,8 +13,12 @@
     "seed": "ts-node -r tsconfig-paths/register src/seed.ts",
     "migrate:createdBy": "ts-node -r tsconfig-paths/register src/scripts/migrateCreatedBy.ts"
   },
+  "engines": {
+    "node": "20.x"
+  },
   "dependencies": {
     "reflect-metadata": "^0.1.13",
+    "rxjs": "^7.8.1",
     "@fastify/cookie": "9.3.1",
     "@nestjs/common": "^10.3.0",
     "@nestjs/config": "^3.2.2",
