@@ -3,6 +3,34 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User } from '../users/schemas/user.schema';
 
+interface FigmaDiscoveredFile {
+  key: string;
+  name: string;
+  displayName: string;
+  thumbnailUrl?: string;
+  thumbnail_url?: string;
+  lastModified?: string;
+  last_modified?: string;
+  url?: string;
+  teamName?: string;
+  teamId?: string;
+  projectName?: string;
+  projectId?: string;
+  description?: string;
+}
+
+interface FigmaDiscoveredProject {
+  id: string;
+  name: string;
+  files: FigmaDiscoveredFile[];
+}
+
+interface FigmaDiscoveredTeam {
+  id: string;
+  name: string;
+  projects: FigmaDiscoveredProject[];
+}
+
 @Injectable()
 export class FigmaService {
   constructor(
@@ -197,23 +225,91 @@ export class FigmaService {
       }
 
       // 6. Transformar la respuesta al formato esperado
-      const transformedFiles = allFiles.map((file: any) => ({
-        key: file.key,
-        name: `${file.name} (${file.projectName})`, // Incluir nombre del proyecto para claridad
-        thumbnail_url: file.thumbnail_url,
-        last_modified: file.last_modified,
-        url: `https://www.figma.com/file/${file.key}/${encodeURIComponent(file.name)}`,
-        // Metadata adicional
-        teamName: file.teamName,
-        teamId: file.teamId,
-        projectName: file.projectName,
-        projectId: file.projectId,
+      const transformedFiles = allFiles.map((file: any) => {
+        const safeName = file.name || 'Archivo sin nombre';
+        const figmaUrl = file.key && file.key !== 'manual-add'
+          ? `https://www.figma.com/file/${file.key}/${encodeURIComponent(safeName)}`
+          : file.url;
+
+        const thumbnail = file.thumbnail_url;
+        const lastModified = file.last_modified;
+
+        return {
+          key: file.key,
+          name: safeName,
+          displayName: `${safeName}${file.projectName ? ` (${file.projectName})` : ''}`,
+          thumbnailUrl: thumbnail,
+          thumbnail_url: thumbnail,
+          lastModified,
+          last_modified: lastModified,
+          url: figmaUrl,
+          // Metadata adicional
+          teamName: file.teamName,
+          teamId: file.teamId,
+          projectName: file.projectName,
+          projectId: file.projectId,
+          description: file.description,
+        };
+      });
+
+      const teamsMap = new Map<string, {
+        id: string;
+        name: string;
+        projects: Map<string, FigmaDiscoveredProject>;
+      }>();
+
+      transformedFiles.forEach((file) => {
+        const teamId = file.teamId || 'unknown-team';
+        const projectId = file.projectId || 'unknown-project';
+
+        if (!teamsMap.has(teamId)) {
+          teamsMap.set(teamId, {
+            id: teamId,
+            name: file.teamName || 'Equipo sin nombre',
+            projects: new Map(),
+          });
+        }
+
+        const team = teamsMap.get(teamId)!;
+        if (!team.projects.has(projectId)) {
+          team.projects.set(projectId, {
+            id: projectId,
+            name: file.projectName || 'Proyecto sin nombre',
+            files: [],
+          });
+        }
+
+        const project = team.projects.get(projectId)!;
+        project.files.push(file);
+      });
+
+      const teams: FigmaDiscoveredTeam[] = Array.from(teamsMap.values()).map((team) => ({
+        id: team.id,
+        name: team.name,
+        projects: Array.from(team.projects.values()).map((project) => ({
+          id: project.id,
+          name: project.name,
+          files: project.files,
+        })),
       }));
 
       if (process.env.NODE_ENV !== 'production') {
         console.log('[FIGMA SERVICE] returning files:', transformedFiles.length);
       }
-      return transformedFiles;
+
+      return {
+        summary: {
+          totalTeams: teams.length,
+          totalProjects: teams.reduce((acc, team) => acc + team.projects.length, 0),
+          totalFiles: transformedFiles.length,
+          generatedAt: new Date().toISOString(),
+          figmaUserEmail: userData.email || null,
+          figmaUserHandle: userData.handle || null,
+          figmaUserId: userData.id || null,
+        },
+        teams,
+        files: transformedFiles,
+      };
       
     } catch (error) {
       console.error('[FIGMA SERVICE] Error fetching user files:', error);
@@ -227,15 +323,50 @@ export class FigmaService {
    * Obtiene los frames de un archivo específico de Figma
    */
   async getFileFrames(userId: string, fileKey: string) {
+    console.log('[FIGMA SERVICE] Getting frames for file:', fileKey, 'user:', userId);
+    
     const user = await this.userModel.findById(userId).lean();
     const figmaToken = user?.providers?.figma?.oauth?.accessToken;
+    const expiresAt = user?.providers?.figma?.oauth?.expiresAt;
     
     if (!figmaToken) {
+      console.error('[FIGMA SERVICE] No Figma token for user:', userId);
       throw new Error('Usuario no tiene token de Figma');
     }
 
+    // Verificar si el token ha expirado
+    if (expiresAt) {
+      const expirationDate = new Date(expiresAt);
+      const now = new Date();
+      if (now >= expirationDate) {
+        console.error('[FIGMA SERVICE] Figma token expired at:', expiresAt);
+        throw new Error('Token de Figma expirado. Por favor, reconecta tu cuenta de Figma.');
+      }
+    }
+
     try {
+      // Primero, verificar que el token sea válido consultando /v1/me
+      console.log('[FIGMA SERVICE] Verifying token validity');
+      const meResponse = await fetch('https://api.figma.com/v1/me', {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      if (!meResponse.ok) {
+        console.error('[FIGMA SERVICE] Token validation failed:', meResponse.status, meResponse.statusText);
+        if (meResponse.status === 401) {
+          throw new Error('Token de Figma inválido o expirado. Reconecta tu cuenta de Figma.');
+        }
+        throw new Error(`Error validando token de Figma: ${meResponse.status}`);
+      }
+
+      const meData = await meResponse.json();
+      console.log('[FIGMA SERVICE] Token valid, user:', meData.email || meData.handle);
+
       // Obtener información del archivo
+      console.log('[FIGMA SERVICE] Fetching file data from Figma API');
       const fileResponse = await fetch(`https://api.figma.com/v1/files/${fileKey}`, {
         headers: {
           'Authorization': `Bearer ${figmaToken}`,
@@ -244,20 +375,37 @@ export class FigmaService {
       });
 
       if (!fileResponse.ok) {
-        throw new Error(`Figma API error: ${fileResponse.status}`);
+        const errorText = await fileResponse.text();
+        console.error('[FIGMA SERVICE] Figma API error:', fileResponse.status, fileResponse.statusText);
+        console.error('[FIGMA SERVICE] Error details:', errorText);
+        
+        if (fileResponse.status === 403) {
+          throw new Error('Sin permisos para acceder a este archivo de Figma. El archivo debe ser público o debes tener acceso explícito. Intenta: 1) Hacer el archivo público en Figma, o 2) Asegurarte de tener permisos de visualización en el archivo.');
+        } else if (fileResponse.status === 404) {
+          throw new Error('Archivo de Figma no encontrado. Verifica que la URL del archivo sea correcta.');
+        } else if (fileResponse.status === 401) {
+          throw new Error('Token de Figma inválido o expirado. Reconecta tu cuenta de Figma.');
+        } else {
+          throw new Error(`Error de Figma API: ${fileResponse.status} - ${errorText.slice(0, 100)}`);
+        }
       }
 
       const fileData = await fileResponse.json();
+      console.log('[FIGMA SERVICE] File data received, extracting frames...');
       
       // Extraer todos los frames del archivo
       const frames = this.extractFrames(fileData.document);
+      console.log('[FIGMA SERVICE] Extracted frames count:', frames.length);
       
       if (frames.length === 0) {
+        console.warn('[FIGMA SERVICE] No frames found in file');
         return { frames: [] };
       }
 
       // Obtener las imágenes de los frames
       const frameIds = frames.map(f => f.id).join(',');
+      console.log('[FIGMA SERVICE] Fetching frame images for IDs:', frameIds);
+      
       const imagesResponse = await fetch(
         `https://api.figma.com/v1/images/${fileKey}?ids=${frameIds}&format=png&scale=1`,
         {
@@ -268,15 +416,16 @@ export class FigmaService {
         }
       );
 
-      if (!imagesResponse.ok) {
-        console.warn('[FIGMA SERVICE] Could not fetch frame images');
-        // Continuar sin imágenes si hay error
+      let imagesData = { images: {} };
+      if (imagesResponse.ok) {
+        imagesData = await imagesResponse.json();
+        console.log('[FIGMA SERVICE] Images data received:', Object.keys(imagesData.images || {}).length, 'images');
+      } else {
+        console.warn('[FIGMA SERVICE] Could not fetch frame images:', imagesResponse.status);
       }
-
-      const imagesData = imagesResponse.ok ? await imagesResponse.json() : { images: {} };
       
       // Combinar frames con sus imágenes
-      return {
+      const result = {
         frames: frames.map(frame => ({
           id: frame.id,
           name: frame.name,
@@ -284,10 +433,13 @@ export class FigmaService {
           y: frame.absoluteBoundingBox?.y || 0,
           width: frame.absoluteBoundingBox?.width || 375,
           height: frame.absoluteBoundingBox?.height || 812,
-          thumbUrl: imagesData.images?.[frame.id] || null,
-          components: this.extractComponents(frame), // Extraer componentes del frame
+          thumbUrl: (imagesData.images as any)?.[frame.id] || null,
+          components: this.extractComponents(frame),
         }))
       };
+      
+      console.log('[FIGMA SERVICE] Returning frames:', result.frames.length);
+      return result;
     } catch (error) {
       console.error('[FIGMA SERVICE] Error fetching file frames:', error);
       throw new Error('Error al obtener pantallas de Figma');

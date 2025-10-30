@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 
 import { IntegrationsController } from './integrations.controller';
+import { DebugController } from './debug.controller';
 import { FigmaService } from './figma.service';
 import { GtmService } from './gtm.service';
 import { Ga4Service } from './ga4.service';
@@ -22,7 +23,7 @@ import { ProjectFigmaFile, ProjectFigmaFileSchema } from '../projects/schemas/pr
       { name: ProjectFigmaFile.name, schema: ProjectFigmaFileSchema },
     ]),
   ],
-  controllers: [IntegrationsController],
+  controllers: [IntegrationsController, DebugController],
   providers: [FigmaService, GtmService, Ga4Service, LookerService],
 })
 export class IntegrationsModule {}

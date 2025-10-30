@@ -15,6 +15,7 @@ import { Project } from '../projects/schemas/project.schema';
 import { Event } from '../events/schemas/event.schema';
 import { User } from '../users/schemas/user.schema';
 import { ProjectFigmaFile } from '../projects/schemas/project-figma-file.schema';
+import { ulid } from 'ulid';
 
 @ApiTags('integrations')
 @ApiBearerAuth()
@@ -253,6 +254,367 @@ export class IntegrationsController {
     return res.redirect(url);
   }
 
+  @Get('figma/token-status')
+  async figmaTokenStatus(@CurrentUser() user: any) {
+    try {
+      console.log('[FIGMA TOKEN STATUS] Checking token status for user:', user.sub || user._id);
+      
+      const userDoc = await this.userModel.findById(user.sub || user._id).lean();
+      const figmaToken = userDoc?.providers?.figma?.oauth?.accessToken;
+      const expiresAt = userDoc?.providers?.figma?.oauth?.expiresAt;
+      const figmaId = userDoc?.providers?.figma?.id;
+      
+      if (!figmaToken) {
+        return { 
+          data: {
+            connected: false,
+            valid: false,
+            message: 'No hay token de Figma. Necesitas conectar tu cuenta.',
+            details: {
+              hasToken: false,
+              hasExpiration: false,
+              expired: false
+            }
+          }
+        };
+      }
+
+      // Verificar si el token ha expirado
+      let isExpired = false;
+      let expiresInSeconds = null;
+      if (expiresAt) {
+        const expirationDate = new Date(expiresAt);
+        const now = new Date();
+        isExpired = now >= expirationDate;
+        expiresInSeconds = Math.floor((expirationDate.getTime() - now.getTime()) / 1000);
+      }
+
+      // Probar el token con la API
+      console.log('[FIGMA TOKEN STATUS] Testing token with API...');
+      const response = await fetch('https://api.figma.com/v1/me', {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      const isValid = response.ok;
+      let userInfo = null;
+      
+      if (isValid) {
+        userInfo = await response.json();
+        console.log('[FIGMA TOKEN STATUS] Token valid, user:', userInfo.email || userInfo.handle);
+      } else {
+        console.error('[FIGMA TOKEN STATUS] Token invalid, status:', response.status);
+      }
+
+      return {
+        data: {
+          connected: true,
+          valid: isValid,
+          message: isValid 
+            ? 'Token de Figma válido y funcionando correctamente.'
+            : isExpired
+              ? 'Token de Figma expirado. Necesitas reconectar tu cuenta.'
+              : 'Token de Figma inválido. Necesitas reconectar tu cuenta.',
+          details: {
+            hasToken: true,
+            hasExpiration: !!expiresAt,
+            expired: isExpired,
+            expiresAt: expiresAt,
+            expiresInSeconds: expiresInSeconds,
+            apiStatus: response.status,
+            figmaUser: isValid ? {
+              id: userInfo?.id,
+              email: userInfo?.email,
+              handle: userInfo?.handle
+            } : null,
+            storedFigmaId: figmaId
+          }
+        }
+      };
+    } catch (error: any) {
+      console.error('[FIGMA TOKEN STATUS] Error checking token:', error);
+      return {
+        data: {
+          connected: false,
+          valid: false,
+          message: 'Error verificando el token de Figma.',
+          details: {
+            error: error.message
+          }
+        }
+      };
+    }
+  }
+
+  @Get('figma/test-token')
+  async testFigmaToken(@CurrentUser() user: any) {
+    try {
+      console.log('[TOKEN TEST] Testing Figma token for user:', user.sub || user._id);
+      
+      const userDoc = await this.userModel.findById(user.sub || user._id).lean();
+      const figmaToken = userDoc?.providers?.figma?.oauth?.accessToken;
+      
+      console.log('[TOKEN TEST] Token exists:', !!figmaToken);
+      console.log('[TOKEN TEST] Token length:', figmaToken?.length || 0);
+      
+      if (!figmaToken) {
+        return { 
+          error: true, 
+          message: 'No hay token de Figma. Necesitas conectar tu cuenta.',
+          data: { hasToken: false }
+        };
+      }
+
+      // Probar el token
+      console.log('[TOKEN TEST] Testing token with Figma API...');
+      const response = await fetch('https://api.figma.com/v1/me', {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      console.log('[TOKEN TEST] Figma API response status:', response.status);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log('[TOKEN TEST] Figma API error:', errorText);
+        
+        return {
+          error: true,
+          message: `Token inválido (${response.status}). Necesitas reconectar Figma.`,
+          data: { 
+            hasToken: true, 
+            tokenValid: false, 
+            status: response.status,
+            errorDetails: errorText 
+          }
+        };
+      }
+
+      const userData = await response.json();
+      console.log('[TOKEN TEST] User data received:', userData.email, userData.handle);
+      
+      return {
+        error: false,
+        message: 'Token válido y funcionando.',
+        data: {
+          hasToken: true,
+          tokenValid: true,
+          userInfo: {
+            email: userData.email,
+            handle: userData.handle,
+            teams: userData.teams?.length || 0
+          }
+        }
+      };
+    } catch (error: any) {
+      console.error('[TOKEN TEST] Error:', error);
+      return {
+        error: true,
+        message: 'Error verificando token.',
+        data: { error: error.message }
+      };
+    }
+  }
+
+  @Get('figma/debug/token-info')
+  async debugFigmaToken(@CurrentUser() user: any) {
+    try {
+      const userDoc = await this.userModel.findById(user.sub || user._id).lean();
+      const figmaToken = userDoc?.providers?.figma?.oauth?.accessToken;
+      
+      if (!figmaToken) {
+        return {
+          data: {
+            hasToken: false,
+            message: 'No hay token de Figma configurado. Necesitas conectar tu cuenta.'
+          }
+        };
+      }
+
+      // Probar el token con la API de Figma
+      const response = await fetch('https://api.figma.com/v1/me', {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      if (!response.ok) {
+        return {
+          data: {
+            hasToken: true,
+            tokenValid: false,
+            status: response.status,
+            message: `Token inválido o expirado (${response.status}). Reconecta tu cuenta de Figma.`
+          }
+        };
+      }
+
+      const userData = await response.json();
+      
+      return {
+        data: {
+          hasToken: true,
+          tokenValid: true,
+          userInfo: {
+            id: userData.id,
+            email: userData.email,
+            handle: userData.handle,
+            teams: userData.teams?.length || 0
+          },
+          message: 'Token válido y funcionando correctamente.'
+        }
+      };
+    } catch (error: any) {
+      console.error('[FIGMA DEBUG] Error checking token:', error);
+      return {
+        data: {
+          hasToken: false,
+          tokenValid: false,
+          error: error.message,
+          message: 'Error verificando el token de Figma.'
+        }
+      };
+    }
+  }
+
+  @Get('figma/test-file/:fileKey')
+  async testSpecificFile(@CurrentUser() user: any, @Param('fileKey') fileKey: string) {
+    try {
+      console.log('[FILE TEST] Testing file access:', fileKey);
+      
+      const userDoc = await this.userModel.findById(user.sub || user._id).lean();
+      const figmaToken = userDoc?.providers?.figma?.oauth?.accessToken;
+      
+      if (!figmaToken) {
+        return { error: true, message: 'No hay token de Figma' };
+      }
+
+      // Probar acceso al archivo específico
+      console.log('[FILE TEST] Testing file access with token...');
+      const response = await fetch(`https://api.figma.com/v1/files/${fileKey}`, {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      console.log('[FILE TEST] File API response status:', response.status);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.log('[FILE TEST] File API error:', errorText);
+        
+        let message = '';
+        switch (response.status) {
+          case 403:
+            message = 'Sin permisos para este archivo. Debe ser público o tienes que tener acceso.';
+            break;
+          case 404:
+            message = 'Archivo no encontrado. Verifica que el ID sea correcto.';
+            break;
+          case 401:
+            message = 'Token inválido o expirado.';
+            break;
+          default:
+            message = `Error ${response.status}: ${errorText}`;
+        }
+        
+        return {
+          error: true,
+          message,
+          data: { 
+            status: response.status,
+            fileKey,
+            errorDetails: errorText 
+          }
+        };
+      }
+
+      const fileData = await response.json();
+      console.log('[FILE TEST] File name:', fileData.name);
+      
+      return {
+        error: false,
+        message: 'Acceso al archivo confirmado.',
+        data: {
+          fileKey,
+          fileName: fileData.name,
+          lastModified: fileData.lastModified,
+          version: fileData.version
+        }
+      };
+    } catch (error: any) {
+      console.error('[FILE TEST] Error:', error);
+      return {
+        error: true,
+        message: 'Error probando archivo.',
+        data: { error: error.message }
+      };
+    }
+  }
+
+  @Post('figma/verify-file-access')
+  async verifyFigmaFileAccess(
+    @CurrentUser() user: any,
+    @Body() body: { fileKey: string }
+  ) {
+    try {
+      console.log('[INTEGRATIONS] Verifying access to Figma file:', body.fileKey);
+      
+      const result = await this.figma.getFileFrames(user.sub || user._id, body.fileKey);
+      
+      return {
+        data: {
+          hasAccess: true,
+          framesCount: result?.frames?.length || 0,
+          message: result?.frames?.length > 0 
+            ? `Acceso confirmado. Se encontraron ${result.frames.length} pantallas.`
+            : 'Acceso confirmado, pero no se encontraron pantallas en el archivo.'
+        }
+      };
+    } catch (error: any) {
+      console.error('[INTEGRATIONS] File access verification failed:', error);
+      
+      let errorMessage = 'Error verificando acceso al archivo.';
+      let requiresReconnection = false;
+      
+      // Detectar si el error es de token expirado o inválido
+      if (error?.message?.includes('Token') || 
+          error?.message?.includes('expirado') || 
+          error?.message?.includes('inválido') ||
+          error?.message?.includes('401')) {
+        errorMessage = error.message || 'Tu sesión de Figma ha expirado. Reconecta tu cuenta.';
+        requiresReconnection = true;
+      } 
+      // Detectar si es un error de permisos
+      else if (error?.message?.includes('Sin permisos') || error?.message?.includes('403')) {
+        errorMessage = error.message || 'No tienes permisos para acceder a este archivo. Asegúrate de que sea público o tengas acceso.';
+      } 
+      // Detectar si el archivo no existe
+      else if (error?.message?.includes('no encontrado') || error?.message?.includes('404')) {
+        errorMessage = error.message || 'Archivo no encontrado. Verifica que la URL sea correcta.';
+      }
+      // Cualquier otro error
+      else if (error?.message) {
+        errorMessage = error.message;
+      }
+      
+      return {
+        data: {
+          hasAccess: false,
+          framesCount: 0,
+          message: errorMessage,
+          requiresReconnection
+        }
+      };
+    }
+  }
+
   @Post('figma/project/:projectId/file')
   async assignFigmaFile(
     @CurrentUser() user: any, 
@@ -260,6 +622,13 @@ export class IntegrationsController {
     @Body() body: { fileKey: string; fileName: string; fileUrl?: string; thumbnail?: string }
   ) {
     try {
+      console.log('[INTEGRATIONS] Assigning Figma file:', { 
+        projectId, 
+        fileKey: body.fileKey, 
+        fileName: body.fileName,
+        userId: user.sub || user._id 
+      });
+
       // Verificar que el proyecto pertenece al usuario
       const project = await this.projectModel.findOne({ 
         _id: projectId, 
@@ -267,6 +636,7 @@ export class IntegrationsController {
       });
       
       if (!project) {
+        console.error('[INTEGRATIONS] Project not found:', projectId);
         return { error: true, message: 'Proyecto no encontrado' };
       }
 
@@ -286,8 +656,61 @@ export class IntegrationsController {
         { upsert: true, new: true }
       );
 
+      console.log('[INTEGRATIONS] File association created/updated:', association._id);
+
+      // Garantizar que la conexion FIGMA quede activa para el proyecto
+      await this.pcModel.updateOne(
+        { projectId, platform: 'FIGMA' },
+        { $set: { disabled: false } },
+        { upsert: true },
+      );
+
+      console.log('[INTEGRATIONS] FIGMA connection enabled for project');
+
+      // Verificar que podemos obtener frames inmediatamente
+      try {
+        console.log('[INTEGRATIONS] Testing frame access...');
+        const testFrames = await this.figma.getFileFrames(user.sub || user._id, body.fileKey);
+        console.log('[INTEGRATIONS] Test frames result:', testFrames?.frames?.length || 0, 'frames');
+        
+        if (testFrames?.frames?.length === 0) {
+          console.warn('[INTEGRATIONS] No frames found in file - may be empty or permission issue');
+        }
+      } catch (testError) {
+        console.error('[INTEGRATIONS] Error testing frame access:', testError);
+        
+        // Si es un error de permisos, devolver error inmediatamente
+        if (testError && typeof testError === 'object' && 'message' in testError) {
+          const errorMessage = (testError as any).message;
+          if (errorMessage.includes('Sin permisos') || errorMessage.includes('403')) {
+            // Remover la asociación que acabamos de crear
+            await this.projectFigmaFileModel.findOneAndDelete({ projectId });
+            return { 
+              error: true, 
+              message: 'No tienes permisos para acceder a este archivo de Figma. Asegúrate de que el archivo sea público o tengas acceso de editor/visualizador.'
+            };
+          } else if (errorMessage.includes('no encontrado') || errorMessage.includes('404')) {
+            await this.projectFigmaFileModel.findOneAndDelete({ projectId });
+            return { 
+              error: true, 
+              message: 'Archivo de Figma no encontrado. Verifica que la URL sea correcta.'
+            };
+          } else if (errorMessage.includes('Token') || errorMessage.includes('401')) {
+            await this.projectFigmaFileModel.findOneAndDelete({ projectId });
+            return { 
+              error: true, 
+              message: 'Tu sesión de Figma ha expirado. Reconecta tu cuenta de Figma.'
+            };
+          }
+        }
+        
+        // Para otros errores, mostrar advertencia pero permitir la asociación
+        console.warn('[INTEGRATIONS] Frame access test failed, but allowing association');
+      }
+
       return { data: association };
     } catch (error: any) {
+      console.error('[INTEGRATIONS] Error assigning Figma file:', error);
       return { 
         error: true, 
         message: error.message || 'Error al asociar archivo de Figma' 
@@ -414,9 +837,75 @@ export class IntegrationsController {
       return { 
         error: true, 
         message: error.message || 'Error al obtener pantallas de Figma',
-        data: { frames: [] } 
+        data: { frames: [] },
       };
     }
+  }
+
+  @Post('wireframes/bulk-upload')
+  async bulkUploadWireframes(
+    @CurrentUser() user: any,
+    @Body() body: { files?: Array<{ name?: string; data: string; mimeType?: string; width?: number; height?: number }> },
+  ) {
+    if (!body?.files || !Array.isArray(body.files) || body.files.length === 0) {
+      return {
+        error: true,
+        message: 'Debes enviar al menos una imagen para importar.',
+        data: { frames: [] },
+      };
+    }
+
+    const importedFrames = body.files.map((file, idx) => {
+      const normalized = this.normalizeImagePayload(file);
+      return {
+        id: ulid(),
+        name: file.name || `Imagen ${idx + 1}`,
+        displayName: file.name || `Imagen ${idx + 1}`,
+        source: 'UPLOAD',
+        uploaderId: user.sub || user._id,
+        mimeType: normalized.mimeType,
+        sizeBytes: normalized.buffer.length,
+        width: file.width ?? null,
+        height: file.height ?? null,
+        dataUrl: normalized.dataUrl,
+        createdAt: new Date().toISOString(),
+      };
+    });
+
+    return {
+      data: {
+        total: importedFrames.length,
+        frames: importedFrames,
+      },
+    };
+  }
+
+  private normalizeImagePayload(file: { data: string; mimeType?: string }) {
+    if (!file?.data) {
+      return {
+        buffer: Buffer.from([]),
+        mimeType: file?.mimeType || 'image/png',
+        dataUrl: '',
+      };
+    }
+
+    let base64Content = file.data;
+    let detectedMime = file.mimeType || 'image/png';
+
+    const dataUriMatch = file.data.match(/^data:(.+);base64,(.+)$/);
+    if (dataUriMatch) {
+      detectedMime = file.mimeType || dataUriMatch[1];
+      base64Content = dataUriMatch[2];
+    }
+
+    const buffer = Buffer.from(base64Content, 'base64');
+    const dataUrl = `data:${detectedMime};base64,${base64Content}`;
+
+    return {
+      buffer,
+      mimeType: detectedMime,
+      dataUrl,
+    };
   }
 
   @Get('figma/oauth/url')
@@ -626,5 +1115,145 @@ export class IntegrationsController {
       { $set: { ga4PropertyId: `properties/${digits}` } },
     );
     return { data: { ok: true } };
+  }
+
+  @Get('validate-all')
+  async validateAllIntegrations(@CurrentUser() user: any) {
+    try {
+      const userId = user.sub || user._id;
+      const userDoc = await this.userModel.findById(userId).lean();
+      
+      const validationResults = {
+        figma: await this.validateFigmaIntegration(userDoc),
+        ga4: await this.validateGA4Integration(userDoc),
+        // Podemos añadir más integraciones aquí
+      };
+
+      // Contar integraciones válidas e inválidas
+      const totalIntegrations = Object.keys(validationResults).length;
+      const validIntegrations = Object.values(validationResults).filter(result => result.isValid).length;
+      const hasIssues = validIntegrations < totalIntegrations;
+
+      return {
+        success: true,
+        data: {
+          summary: {
+            totalIntegrations,
+            validIntegrations,
+            hasIssues,
+            message: hasIssues 
+              ? `${totalIntegrations - validIntegrations} integración(es) requieren atención`
+              : 'Todas las integraciones están funcionando correctamente'
+          },
+          integrations: validationResults
+        }
+      };
+    } catch (error: any) {
+      console.error('[VALIDATE INTEGRATIONS] Error:', error);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  private async validateFigmaIntegration(userDoc: any) {
+    try {
+      const figmaToken = userDoc?.providers?.figma?.oauth?.accessToken;
+      
+      if (!figmaToken) {
+        return {
+          platform: 'figma',
+          isValid: false,
+          hasToken: false,
+          issue: 'not_connected',
+          message: 'Figma no está conectado',
+          action: 'connect',
+          actionLabel: 'Conectar Figma'
+        };
+      }
+
+      // Probar el token con la API de Figma
+      const response = await fetch('https://api.figma.com/v1/me', {
+        headers: {
+          'Authorization': `Bearer ${figmaToken}`,
+          'User-Agent': 'Analytics-Weaver/1.0',
+        },
+      });
+
+      if (!response.ok) {
+        return {
+          platform: 'figma',
+          isValid: false,
+          hasToken: true,
+          issue: 'token_invalid',
+          status: response.status,
+          message: `Token de Figma inválido o expirado (${response.status})`,
+          action: 'reconnect',
+          actionLabel: 'Reconectar Figma'
+        };
+      }
+
+      const userData = await response.json();
+      return {
+        platform: 'figma',
+        isValid: true,
+        hasToken: true,
+        message: 'Figma conectado correctamente',
+        userInfo: {
+          email: userData.email,
+          handle: userData.handle
+        }
+      };
+    } catch (error: any) {
+      return {
+        platform: 'figma',
+        isValid: false,
+        hasToken: true,
+        issue: 'connection_error',
+        message: 'Error al verificar conexión con Figma',
+        error: error.message,
+        action: 'reconnect',
+        actionLabel: 'Reconectar Figma'
+      };
+    }
+  }
+
+  private async validateGA4Integration(userDoc: any) {
+    try {
+      const ga4Token = userDoc?.providers?.ga4?.oauth?.accessToken;
+      
+      if (!ga4Token) {
+        return {
+          platform: 'ga4',
+          isValid: false,
+          hasToken: false,
+          issue: 'not_connected',
+          message: 'Google Analytics 4 no está conectado',
+          action: 'connect',
+          actionLabel: 'Conectar GA4'
+        };
+      }
+
+      // Aquí podrías hacer una validación real del token de GA4 si es necesario
+      // Por ahora, asumimos que si existe el token, es válido
+      return {
+        platform: 'ga4',
+        isValid: true,
+        hasToken: true,
+        message: 'Google Analytics 4 conectado correctamente'
+      };
+    } catch (error: any) {
+      return {
+        platform: 'ga4',
+        isValid: false,
+        hasToken: true,
+        issue: 'connection_error',
+        message: 'Error al verificar conexión con GA4',
+        error: error.message,
+        action: 'reconnect',
+        actionLabel: 'Reconectar GA4'
+      };
+    }
   }
 }

@@ -12,35 +12,69 @@ export class DesignsService {
   ) {}
 
   async importFigmaFile(_fileKey: string, _nodeIds?: string[]) {
+    // Este método ya no debería usarse, pero si se llama, devolver array vacío
+    console.warn('[DESIGNS] importFigmaFile is deprecated, use figma.service directly');
     return {
-      frames: [
-        { id: 'frame_1', name: 'Home / Hero', thumbUrl: 'https://placehold.co/200x120' },
-        { id: 'frame_2', name: 'Checkout / Step 1', thumbUrl: 'https://placehold.co/200x120' },
-      ],
+      frames: [],
     };
   }
 
   async listFrames(projectId: string, userId: string) {
     try {
-      // Buscar el archivo de Figma asociado a este proyecto (independiente del userId)
-      const projectFigmaFile = await this.projectFigmaFileModel.findOne({ projectId });
+      // Buscar el archivo de Figma asociado a este proyecto
+      const projectFigmaFile = await this.projectFigmaFileModel.findOne({ 
+        projectId, 
+        isActive: true 
+      }).lean();
       
       if (!projectFigmaFile) {
-        // Si no hay archivo asociado, devolver mock data
-        return [
-          { id: `${projectId}_frame_1`, name: 'Mock Frame 1', thumbUrl: 'https://placehold.co/200x120' },
-        ];
+        // En lugar de devolver mocks, devolver array vacío
+        console.log('[DESIGNS] No Figma file associated with project:', projectId);
+        return [];
       }
 
       // Obtener frames reales de Figma
-  const result = await this.figmaService.getFileFrames(userId, projectFigmaFile.figmaFileKey);
-      return result.frames || [];
+      const candidateUserIds = Array.from(
+        new Set(
+          [userId, projectFigmaFile.userId].filter((id): id is string => Boolean(id)),
+        ),
+      );
+
+      let lastError: unknown = null;
+      for (const candidateId of candidateUserIds) {
+        try {
+          console.log('[DESIGNS] Trying to get frames with user:', candidateId);
+          const result = await this.figmaService.getFileFrames(candidateId, projectFigmaFile.figmaFileKey);
+          
+          if (result?.frames && Array.isArray(result.frames)) {
+            console.log('[DESIGNS] Successfully got frames:', result.frames.length);
+            return result.frames;
+          }
+        } catch (error) {
+          lastError = error;
+          console.warn('[DESIGNS] Error getting frames with user', candidateId, error);
+          
+          // Si es un error 403, es específico y útil mostrarlo
+          if (error && typeof error === 'object' && 'message' in error) {
+            const errorMessage = (error as any).message;
+            if (errorMessage.includes('Sin permisos') || errorMessage.includes('403')) {
+              console.error('[DESIGNS] Permission denied for Figma file. User needs proper access.');
+              // No intentar con otros usuarios si es un problema de permisos
+              break;
+            }
+          }
+        }
+      }
+
+      // Si llegamos aquí, no pudimos obtener frames reales
+      console.error('[DESIGNS] Failed to get real frames, last error:', lastError);
+      
+      // En lugar de devolver mocks, devolver array vacío
+      return [];
     } catch (error) {
-      console.error('Error listing frames:', error);
-      // Fallback a mock data si hay error
-      return [
-        { id: `${projectId}_frame_1`, name: 'Mock Frame 1', thumbUrl: 'https://placehold.co/200x120' },
-      ];
+      console.error('[DESIGNS] Error in listFrames:', error);
+      // No devolver mocks, devolver array vacío
+      return [];
     }
   }
 
